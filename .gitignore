@@ -1,0 +1,4 @@
+*.egg-info/
+/notable2/__pycache__/
+flycheck_*
+*/__pycache__/

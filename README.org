@@ -1,0 +1,11 @@
+* Routine for solving the TOV equations
+
+Solves the TOV equations expressed as function of the pseudo enthalpy with routines from scipy.integrate.
+The code is written for tabulated EOSs in the Pizza format for the [[https://bitbucket.org/FreeTHC/dist][WhiskyTHC]] code in [[https://www.einsteintoolkit.org/][Einstein Toolkit]] but can probably be easily adapted for other formats.
+
+** Dependencies
+  - numpy
+  - scipy
+  - h5py
+  - [[https://github.com/fguercilena/alpyne][alpyne]]
+  - [[https://github.com/Max-Jacobi/tabulatedEOS][tabulatedEOS]]
