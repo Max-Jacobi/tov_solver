@@ -194,6 +194,7 @@ class TOVSolver:
         self.eos_table["rho"] = eos.get_key("density")
         self.eos_table["ye"] = np.zeros_like(self.eos_table["rho"])
         ye_0 = eos.get_key("ye")
+        ye_0 = ye_0[ye_0 <= .5]  # equilibrium ye should always be smaller .5
         max_ye = ye_0.max()
         min_ye = ye_0.min()
         cutoff = 1e-5
@@ -205,6 +206,13 @@ class TOVSolver:
         mu_nu = getter(ye, rho)
 
         for ii, (dd, mn) in enumerate(zip(self.eos_table["rho"], mu_nu)):
+            if np.all(mn > 0):
+                self.eos_table["ye"][ii] = min_ye
+                continue
+            if np.all(mn < 0):
+                self.eos_table["ye"][ii] = max_ye
+                continue
+
             f = interp1d(ye_0, mn, kind="linear", bounds_error=True)
             try:
                 self.eos_table["ye"][ii] = bisect(
