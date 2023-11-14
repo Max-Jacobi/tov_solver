@@ -1,16 +1,15 @@
 import warnings
-from typing import TYPE_CHECKING, Dict, Optional, Callable
+from typing import TYPE_CHECKING, Dict, Optional, Callable, Self
 from datetime import datetime
 
 import numpy as np
-from scipy.integrate import solve_ivp, cumulative_trapezoid, odeint
+import h5py as h5
+from scipy.integrate import solve_ivp, simps
 from scipy.integrate._ivp.ivp import OdeResult
 from scipy.interpolate import interp1d
 from scipy.optimize import bisect, minimize_scalar
-from h5py import File
 
-from tabulatedEOS import TabulatedEOS
-from tabulatedEOS.Utils import RU, U
+from tabulatedEOS.PizzaEOS import RU, U, PizzaEOS
 
 if TYPE_CHECKING:
     from numpy.typing import NDArray
@@ -20,7 +19,7 @@ _lin_interp_keys = ['enthalpy', 'mu_nu', 'ye',
                     'Gamma', 'cs2', 'energy', ]
 
 
-def _calculate_tidal_love_number(y, c):
+def calculate_tidal_love_number(y, c):
     """
     Eq. (23) in Hinderer etal (2008)
     (note that there is an Erratum for this equation)
@@ -42,6 +41,7 @@ class TOVSolution:
     Attributes:
         parameters (dict): A dictionary of the TOV paramters obtained from solving.
         data (dict): A dictionary of the radial arrays obtained from solving.
+        eos_table (dict): A dictionary containing the cold beta-eq. EOS table.
     """
     data: Dict[str, "NDArray[np.float_]"]
     parameters: Dict[str, float]
@@ -49,25 +49,22 @@ class TOVSolution:
     eos_namee: str
 
     @classmethod
-    def load(cls, path: str):
-        with File(path, 'r') as hf:
-            data = {}
+    def load(cls, path: str) -> Self:
+        instance = cls.__new__(cls)
+        with h5.File(path, 'r') as hf:
+            instance.data = {}
             for key in hf.keys():
                 if key == 'eos_table':
                     continue
-                data[key] = hf[key][()]
-            parameters = {}
+                instance.data[key] = np.array(hf[key])
+            instance.parameters = {}
             for key in hf.attrs.keys():
-                parameters[key] = hf.attrs[key]
-            eos_table = {}
+                if isinstance(par := hf.attrs[key], float):
+                    instance.parameters[key] = par
+            instance.eos_table = {}
             for key in hf['eos_table'].keys():
-                eos_table[key] = hf['eos_table'][key][()]
-            eos_name = hf['eos_table'].attrs['eos_name']
-        instance = cls.__new__(cls)
-        instance.data = data
-        instance.parameters = parameters
-        instance.eos_table = eos_table
-        instance.eos_name = eos_name
+                instance.eos_table[key] = np.array(hf['eos_table'][key])
+            instance.eos_name = hf['eos_table'].attrs['eos_name']
         return instance
 
     def __init__(
@@ -120,14 +117,15 @@ class TOVSolution:
         self.parameters["M"] = self.data["m"][-1]
 
         c = self.parameters["M"] / self.parameters["R"]
-        k_2 = _calculate_tidal_love_number(y=self.data["y"][-1], c=c)
+        k_2 = calculate_tidal_love_number(y=self.data["y"][-1], c=c)
 
+        self.parameters['Mbary'] = self._calculate_mbary()
         self.parameters["C"] = c
         self.parameters["k_2"] = k_2
         self.parameters["Lambda"] = 2/3*k_2*c**-5
 
     def save(self, path: str,):
-        with File(path, 'w') as hf:
+        with h5.File(path, 'w') as hf:
             for key in self.data:
                 hf.create_dataset(key, data=self.data[key])
             for key in self.parameters:
@@ -139,13 +137,23 @@ class TOVSolution:
             for key in self.eos_table:
                 grp.create_dataset(key, data=self.eos_table[key])
 
+    def _calculate_mbary(self) -> float:
+        rad = self.data['r']
+        rho = self.data['rho']
+        mm = self.data['m']
+        lam = - np.log(1 - 2*mm/rad)
+
+        integ = 4*np.pi*rad**2*rho*np.exp(lam/2)
+
+        return float(simps(integ, rad))
+
 
 class TOVSolver:
     """
     A class for solving the Tolman-Oppenheimer-Volkoff (TOV) equations for a given equation of state (EOS).
 
     Parameters:
-        equation_of_state (TabulatedEOS): The equation of state.
+        equation_of_state (PizzaEOS): The equation of state in Pizza format.
         verbose (bool, optional): If True, print progress and information during solving. Default is False.
         correct_pressure (bool, optional): If True, correct any non-monotonic pressure in the EOS table. Default is True.
 
@@ -162,7 +170,7 @@ class TOVSolver:
 
     def __init__(
         self,
-        eos: TabulatedEOS,
+        eos: PizzaEOS,
         verbose: bool = False,
         correct_pressure: bool = True,
     ):
@@ -170,7 +178,7 @@ class TOVSolver:
         Initializes the TOV solver with the given equation of state.
 
         Args:
-            equation_of_state (TabulatedEOS): The equation of state.
+            equation_of_state (PizzaEOS): The equation of state in Pizza format.
             verbose (bool, optional): If True, print progress and information during solving. Default is False.
             correct_pressure (bool, optional): If True, correct any non-monotonic pressure in the EOS table. Default is True.
         """
@@ -186,7 +194,7 @@ class TOVSolver:
         self.solutions_by_mass = {}
         self.solutions_by_enthalpy = {}
 
-    def _generate_eos_table(self, eos: TabulatedEOS,):
+    def _generate_eos_table(self, eos: PizzaEOS,):
         """
         Generate the EOS table required for TOV solving.
         """
@@ -201,9 +209,9 @@ class TOVSolver:
         rho, ye = np.meshgrid(self.eos_table["rho"], ye_0, indexing="ij")
         getter = eos.get_cold_caller(
             ["mu_p", "mu_e", "mu_n"],
-            lambda mu_p, mu_e, mu_n, *_: mu_p + mu_e - mu_n
+            lambda mu_p, mu_e, mu_n, **_: mu_p + mu_e - mu_n
         )
-        mu_nu = getter(ye, rho)
+        mu_nu = getter(ye=ye, rho=rho)
 
         for ii, (dd, mn) in enumerate(zip(self.eos_table["rho"], mu_nu)):
             if np.all(mn > 0):
@@ -225,17 +233,17 @@ class TOVSolver:
                 else:
                     self.eos_table["ye"][ii] = max_ye
 
-        self.eos_table["mu_nu"] = getter(
-            self.eos_table["ye"], self.eos_table["rho"])
-        getter = eos.get_cold_caller(["pressure"])
-        self.eos_table["press"] = getter(
-            self.eos_table["ye"], self.eos_table["rho"])
-        getter = eos.get_cold_caller(["internalEnergy"])
-        self.eos_table["eps"] = getter(
-            self.eos_table["ye"], self.eos_table["rho"])
-        getter = eos.get_cold_caller(["cs2"])
-        self.eos_table["cs2"] = getter(
-            self.eos_table["ye"], self.eos_table["rho"])
+        kw = dict(
+            ye=self.eos_table["ye"],
+            rho=self.eos_table["rho"]
+        )
+
+        self.eos_table["mu_nu"] = getter(**kw)
+        for table_key, eos_key in (('press', 'pressure'),
+                                   ('eps', 'internalEnergy'),
+                                   ('cs2', 'cs2')):
+            getter = eos.get_cold_caller([eos_key])
+            self.eos_table[table_key] = getter(**kw)
 
         self.eos_table["energy"] = self.eos_table["rho"] * \
             (1 + self.eos_table["eps"])
@@ -249,19 +257,27 @@ class TOVSolver:
         Correct any non-monotonic pressure in the EOS table.
         """
         unphys_mask = self.eos_table["press"] > 20
+        if self.verbose:
+            print(
+                f"Correcting {unphys_mask.sum()} unphysical pressure values."
+            )
         if np.any(unphys_mask):
-            i_s = np.where(unphys_mask)[0]
+            i_start = np.where(unphys_mask)[0]
             for kk in self.eos_table:
                 self.eos_table[kk] = np.delete(
-                    self.eos_table[kk], i_s
+                    self.eos_table[kk], i_start
                 )
 
         monotonic_mask = np.diff(self.eos_table["press"]) <= 0
+        if self.verbose:
+            print(
+                f"Correcting {monotonic_mask.sum()} non-monotonic pressure values."
+            )
         if np.any(monotonic_mask):
-            i_s = np.where(monotonic_mask)[0] + 1
+            i_start = np.where(monotonic_mask)[0] + 1
             for kk in self.eos_table:
                 self.eos_table[kk] = np.delete(
-                    self.eos_table[kk], i_s
+                    self.eos_table[kk], i_start
                 )
 
     def _calc_enthalpy(self):
@@ -376,7 +392,7 @@ class TOVSolver:
     def _get_sources_by_enthalpy(
         self,
         enthalpy: float,
-        r_mass_ye: "NDArray[np.float_]",
+        r_mass_y: "NDArray[np.float_]",
     ):
         """
         Calculate TOV sources as a function of pseudo enthalpy.
@@ -384,12 +400,12 @@ class TOVSolver:
 
         Args:
             enthalpy (float): Pseudo enthalpy value.
-            r_mass_ye (Tuple[float, float, float]): Tuple containing radial coordinate, mass, and electron_fraction.
+            r_mass_y (Tuple[float, float, float]): Tuple containing radial coordinate, mass, and electron_fraction.
 
         Returns:
             np.ndarray: Array containing the derivatives of radial coordinate, mass, and electron_fraction with respect to pseudo enthalpy.
         """
-        rr, mass, yy = r_mass_ye
+        rr, mass, yy = r_mass_y
 
         kw = dict(value=enthalpy, x_key="enthalpy")
         energy = self._interpolate_eos_table(key="energy", **kw)
@@ -593,13 +609,17 @@ class TOVSolver:
         p_span = central_pressure, terminal_pressure
 
         # lin + log grid to make the integration more stable
-        p_int = central_pressure*.1
-        p_eval = np.concatenate([
-            np.linspace(central_pressure, p_int, num_points//2+1)[:-1],
-            np.logspace(np.log10(p_int),
-                        np.log10(terminal_pressure),
-                        num_points//2)
-        ])
+        # p_int = central_pressure*.1
+        # p_eval = np.concatenate([
+        #     np.linspace(central_pressure, p_int, num_points//2+1)[:-1],
+        #     np.logspace(np.log10(p_int),
+        #                 np.log10(terminal_pressure),
+        #                 num_points//2)
+        # ])
+        p_eval = np.logspace(np.log10(central_pressure),
+                             np.log10(terminal_pressure),
+                             100)
+
         p_eval = np.clip(p_eval, terminal_pressure, central_pressure)
 
         y0 = np.array([1e-10, 1e-10, 2.0])
