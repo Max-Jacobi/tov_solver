@@ -4,10 +4,10 @@ from datetime import datetime
 
 import numpy as np
 import h5py as h5
-from scipy.integrate import solve_ivp, simps
+from scipy.integrate import solve_ivp, simps, cumulative_trapezoid
 from scipy.integrate._ivp.ivp import OdeResult
 from scipy.interpolate import interp1d
-from scipy.optimize import bisect, minimize_scalar
+from scipy.optimize import minimize_scalar, toms748
 
 from tabulatedEOS.PizzaEOS import RU, U, PizzaEOS
 
@@ -223,7 +223,7 @@ class TOVSolver:
 
             f = interp1d(ye_0, mn, kind="linear", bounds_error=True)
             try:
-                self.eos_table["ye"][ii] = bisect(
+                self.eos_table["ye"][ii] = toms748(
                     f, a=ye_0[0], b=ye_0[-1],
                     xtol=1e-6, maxiter=100
                 )
@@ -271,7 +271,8 @@ class TOVSolver:
         monotonic_mask = np.diff(self.eos_table["press"]) <= 0
         if self.verbose:
             print(
-                f"Correcting {monotonic_mask.sum()} non-monotonic pressure values."
+                f"Correcting {monotonic_mask.sum(
+                )} non-monotonic pressure values."
             )
         if np.any(monotonic_mask):
             i_start = np.where(monotonic_mask)[0] + 1
@@ -294,7 +295,8 @@ class TOVSolver:
             if not np.all(mask := (self.eos_table[key] >= 0)):
                 if self.verbose:
                     warnings.warn(
-                        f"{self}: {(~mask).sum()} points in {key} are either <=0 or NaN",
+                        f"{self}: {(~mask).sum()} points in {
+                            key} are either <=0 or NaN",
                         RuntimeWarning
                     )
                 self.eos_table[key][~mask] = self.eos_table[key][mask].min()
@@ -303,7 +305,8 @@ class TOVSolver:
             if not np.all(mask := (self.eos_table[key] > 0)):
                 if self.verbose:
                     warnings.warn(
-                        f"{self}: {(~mask).sum()} points in {key} are either <=0 or NaN",
+                        f"{self}: {(~mask).sum()} points in {
+                            key} are either <=0 or NaN",
                         RuntimeWarning
                     )
                 self.eos_table[key][~mask] = self.eos_table[key][mask].min()
@@ -643,7 +646,7 @@ class TOVSolver:
     def solve_for_target_mass(
         self,
         target_mass: float,
-        root_finder: Callable = bisect,
+        root_finder: Callable = toms748,
         solver_kwargs: Dict = {},
         solve_by: str = "enthalpy",
         **kwargs
@@ -666,7 +669,8 @@ class TOVSolver:
         verbose = self.verbose
 
         if verbose:
-            print(f"{self}: Finding central {solve_by} for {target_mass}M star")
+            print(f"{self}: Finding central {
+                  solve_by} for {target_mass}M star")
             print(f"central {solve_by:>8s} {'mass':>11s} {'radius':>11s}")
             self.verbose = False
 
@@ -788,7 +792,8 @@ class TOVSolver:
         solution = solver(central_value, **solver_kwargs)
         if solution.status < 0:
             raise RuntimeError(
-                f"{self}: Error in final solution for maximum Mass with {solve_by} method."
+                f"{self}: Error in final solution for maximum Mass with {
+                    solve_by} method."
                 f"{solution.message}"
             )
         if not (solve_by == "pressure"):  # DEPRECATED
